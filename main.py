@@ -6,19 +6,11 @@ from agent import stock_agent
 from utils import get_stock_data, calculate_price_change, analyze_volume
 import re
 
-
-
 app = FastAPI(title="Stock Market AI Agent API (DeepSeek)")
 
 # Analyze Stock Endpoint
 @app.post("/analyze")
 async def analyze_stock(query: StockQuery):
-    """
-    POST /analyze
-    Fetches stock data for a given ticker, constructs a prompt with the data,
-    invokes the LangChain agent to generate analysis, and returns the analysis
-    along with recommendation and confidence metrics.
-    """
     try:
         # Fetch real-time stock data
         stock_data = get_stock_data(query.ticker)
@@ -90,10 +82,6 @@ Provide analysis and conclude with: 'Recommendation: [Buy/Sell/Hold]'"""
 # Health check endpoint
 @app.get("/health")
 async def health_check():
-    """
-    GET /health
-    Simple endpoint to check if the server is running.
-    """
     return {"status": "healthy"}
 
 if __name__ == "__main__":

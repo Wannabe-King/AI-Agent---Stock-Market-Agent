@@ -9,8 +9,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 def create_stock_agent():
-    """Create and configure the LangChain stock market agent."""
-    
     # Define the tool for fetching stock data
     tools = [
         Tool(

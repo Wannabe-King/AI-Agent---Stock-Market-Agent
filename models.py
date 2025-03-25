@@ -4,21 +4,12 @@ from pydantic import BaseModel, field_validator
 from typing import Optional
 
 class InvalidTickerError(Exception):
-    """Custom exception raised when a ticker symbol is invalid."""
     pass
 
 class DataUnavailableError(Exception):
-    """Custom exception raised when required market data is unavailable."""
     pass
 
 class StockQuery(BaseModel):
-    """
-    StockQuery model for validating requests.
-    
-    Attributes:
-        ticker: Stock ticker symbol (1-5 alphabetical characters).
-        question: Analysis question (optional).
-    """
     ticker: str
     question: Optional[str] = "What is the current stock price and recommendation?"
 

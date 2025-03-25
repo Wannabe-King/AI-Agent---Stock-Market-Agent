@@ -1,4 +1,4 @@
-﻿# Stock Market AI Agent API (DeepSeek)
+﻿# Stock Market AI Agent API 
 
 This project implements an AI-powered stock market analysis API. It fetches real-time stock data, analyzes it using a LangChain agent integrated with DeepSeek, and provides stock recommendations.
 

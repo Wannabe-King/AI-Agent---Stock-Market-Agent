@@ -1,21 +1,35 @@
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel,field_validator
 from langchain.agents import initialize_agent, Tool
 from langchain_openai import ChatOpenAI
 import yfinance as yf
 import os
 from dotenv import load_dotenv
 from typing import Optional
+from typing import Dict, Union
+from fastapi.responses import JSONResponse
 import re
+
 
 load_dotenv()
 
 app = FastAPI(title="Stock Market AI Agent API (DeepSeek)")
 
+class InvalidTickerError(Exception):
+    pass
+
+class DataUnavailableError(Exception):
+    pass
+
 class StockQuery(BaseModel):
-    """Request model for stock price queries"""
     ticker: str
-    question: Optional[str] = "What is the current stock price and recent performance?"
+    question: Optional[str] = "What is the current stock price and recommendation?"
+
+    @field_validator('ticker')
+    def validate_ticker(cls, v):
+        if not v.isalpha() or len(v) > 5:
+            raise ValueError("Invalid ticker format. Must be 1-5 alphabetical characters")
+        return v.upper()
 
 def get_stock_data(ticker: str) -> str:
     # Fetching real time stock price from yfinanace
@@ -24,21 +38,28 @@ def get_stock_data(ticker: str) -> str:
         info = stock.info
         history = stock.history(period="5d")
         
-        return f"""
-        {ticker.upper()} Stock Data:
-        - Current Price: {history['Close'].iloc[-1]:.2f}
-        - 5-Day Change: {(history['Close'].iloc[-1] - history['Close'].iloc[0]):.2f}
-        - Volume: {history['Volume'].iloc[-1]:,}
-        - 52 Week High: {info.get('fiftyTwoWeekHigh', 'N/A')}
-        - Market Cap: {info.get('marketCap', 'N/A'):,}
-        - PE Ratio: {info.get('trailingPE', 'N/A')}
-        """
-    except Exception as e:
-        return f"Error fetching data for {ticker}: {str(e)}"
+        if history.empty:
+            raise InvalidTickerError(f"No data found for ticker {ticker}")
+            
+        required_fields = ['Close', 'High', 'Low', 'Volume']
+        if not all(field in history.columns for field in required_fields):
+            raise DataUnavailableError("Missing essential market data fields")
 
-def get_pe_ratio(ticker: str) -> float:
-    stock = yf.Ticker(ticker)
-    return stock.info.get('trailingPE', 0)
+        return {
+            'current_price': history['Close'].iloc[-1],
+            'high': history['High'].iloc[-1],
+            'low': history['Low'].iloc[-1],
+            'volume': history['Volume'].iloc[-1],
+            'pe_ratio': info.get('trailingPE', 'N/A'),
+            'market_cap': info.get('marketCap', 'N/A')
+        }
+    except ValueError as e:  # Catch general value errors
+        raise InvalidTickerError(f"Invalid ticker {ticker}") from e
+    except Exception as e:  # General exception catch for yfinance errors
+        if "No timezone found" in str(e):
+            raise DataUnavailableError("Missing timezone data")
+        raise DataUnavailableError(f"YFinance error: {str(e)}")
+
 
 def get_price_change(ticker: str) -> dict:
     stock = yf.Ticker(ticker)
@@ -54,6 +75,27 @@ def get_volume_trend(ticker: str) -> str:
     avg_volume = hist['Volume'].mean()
     last_volume = hist['Volume'].iloc[-1]
     return "Above Average" if last_volume > avg_volume else "Below Average"
+
+def get_pe_ratio(ticker: str) -> float:
+    try:
+        stock = yf.Ticker(ticker)
+        return stock.info.get('trailingPE', 0)
+    except:
+        return 0
+
+def calculate_price_change(data: dict) -> dict:
+    hist = yf.Ticker(data['ticker']).history(period="5d")
+    return {
+        "5_day": (hist['Close'].iloc[-1] - hist['Close'].iloc[0]) / hist['Close'].iloc[0] * 100
+    }
+
+def analyze_volume(data: dict) -> str:
+    avg_volume = sum(data.get('volume_history', [])) / len(data.get('volume_history', [1]))
+    return "Above Average" if data['current_volume'] > avg_volume else "Below Average"
+
+def validate_response(response: str) -> bool:
+    """Ensure response contains valid recommendation"""
+    return bool(re.search(r"Recommendation:\s*(Buy|Sell|Hold)", response, re.I))
 
 def create_stock_agent():
     """Create and configure the LangChain stock market agent"""
@@ -89,19 +131,27 @@ stock_agent = create_stock_agent()
 
 # analyze_stock endpoint
 @app.post("/analyze")
-@app.post("/analyze")
 async def analyze_stock(query: StockQuery):
     try:
-        prompt = f"""Analyze {query.ticker} stock using this data: 
-        {get_stock_data(query.ticker)}.
+        # Attempt to fetch stock data first
+        stock_data = get_stock_data(query.ticker)
+        
+        # Convert dict data to formatted string for the prompt
+        data_str = "\n".join([f"{k.replace('_', ' ').title()}: {v}" 
+                            for k, v in stock_data.items()])
+        
+        prompt = f"""Analyze {query.ticker} stock using this data:
+        {data_str}
         Answer: {query.question}
-        Provide technical analysis with key metrics and trends.
-        Conclude with a investment recommendation using format: 'Recommendation: [Buy/Sell/Hold]'
-        Give 3 brief reasons for your recommendation."""
+        Provide analysis and conclude with: 'Recommendation: [Buy/Sell/Hold]'"""
         
-        response = stock_agent.run(prompt)
+        response = stock_agent.invoke(prompt)
         
-        # Extract recommendation using regex
+        # Ensure response is string
+        if not isinstance(response, str):
+            response = str(response)
+        
+        # Recommendation extraction
         recommendation_match = re.search(
             r"Recommendation:\s*(Buy|Sell|Hold)", 
             response, 
@@ -109,12 +159,12 @@ async def analyze_stock(query: StockQuery):
         )
         recommendation = recommendation_match.group(1).capitalize() if recommendation_match else "Hold"
         
-        # Clean up analysis text
+        # Clean analysis text
         analysis = re.sub(
             r"\s*Recommendation:\s*(Buy|Sell|Hold).*", 
             "", 
             response, 
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE | re.DOTALL
         ).strip()
 
         return {
@@ -122,14 +172,29 @@ async def analyze_stock(query: StockQuery):
             "analysis": analysis,
             "recommendation": recommendation,
             "confidence_metrics": {
-                "pe_ratio": get_pe_ratio(query.ticker),
-                "price_change": get_price_change(query.ticker),
-                "volume_trend": get_volume_trend(query.ticker)
+                "pe_ratio": stock_data.get('pe_ratio', 0),
+                "price_change": calculate_price_change(stock_data),
+                "volume_trend": analyze_volume(stock_data)
             },
             "source": "yfinance + DeepSeek V3 (OpenRouter)"
         }
+
+    except InvalidTickerError as e:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Invalid ticker symbol: {query.ticker}", "details": str(e)}
+        )
+    except DataUnavailableError as e:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Market data unavailable", "resolution": "Try again later"}
+        )
+    
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Processing error", "message": str(e)}
+        )
 
 # endpoint to check server is up or not
 @app.get("/health")

@@ -6,6 +6,7 @@ import yfinance as yf
 import os
 from dotenv import load_dotenv
 from typing import Optional
+import re
 
 load_dotenv()
 
@@ -34,6 +35,25 @@ def get_stock_data(ticker: str) -> str:
         """
     except Exception as e:
         return f"Error fetching data for {ticker}: {str(e)}"
+
+def get_pe_ratio(ticker: str) -> float:
+    stock = yf.Ticker(ticker)
+    return stock.info.get('trailingPE', 0)
+
+def get_price_change(ticker: str) -> dict:
+    stock = yf.Ticker(ticker)
+    hist = stock.history(period="5d")
+    return {
+        "5_day": hist['Close'].pct_change().iloc[-1] * 100,
+        "1_month": stock.history(period="1mo")['Close'].pct_change().iloc[-1] * 100
+    }
+
+def get_volume_trend(ticker: str) -> str:
+    stock = yf.Ticker(ticker)
+    hist = stock.history(period="5d")
+    avg_volume = hist['Volume'].mean()
+    last_volume = hist['Volume'].iloc[-1]
+    return "Above Average" if last_volume > avg_volume else "Below Average"
 
 def create_stock_agent():
     """Create and configure the LangChain stock market agent"""
@@ -67,26 +87,51 @@ def create_stock_agent():
 
 stock_agent = create_stock_agent()
 
+# analyze_stock endpoint
+@app.post("/analyze")
 @app.post("/analyze")
 async def analyze_stock(query: StockQuery):
     try:
         prompt = f"""Analyze {query.ticker} stock using this data: 
         {get_stock_data(query.ticker)}.
         Answer: {query.question}
-        Provide technical analysis with key metrics and trends."""
+        Provide technical analysis with key metrics and trends.
+        Conclude with a investment recommendation using format: 'Recommendation: [Buy/Sell/Hold]'
+        Give 3 brief reasons for your recommendation."""
         
-        response = stock_agent.invoke(prompt)
+        response = stock_agent.run(prompt)
+        
+        # Extract recommendation using regex
+        recommendation_match = re.search(
+            r"Recommendation:\s*(Buy|Sell|Hold)", 
+            response, 
+            re.IGNORECASE
+        )
+        recommendation = recommendation_match.group(1).capitalize() if recommendation_match else "Hold"
+        
+        # Clean up analysis text
+        analysis = re.sub(
+            r"\s*Recommendation:\s*(Buy|Sell|Hold).*", 
+            "", 
+            response, 
+            flags=re.IGNORECASE
+        ).strip()
+
         return {
             "ticker": query.ticker,
-            "analysis": response,
+            "analysis": analysis,
+            "recommendation": recommendation,
+            "confidence_metrics": {
+                "pe_ratio": get_pe_ratio(query.ticker),
+                "price_change": get_price_change(query.ticker),
+                "volume_trend": get_volume_trend(query.ticker)
+            },
             "source": "yfinance + DeepSeek V3 (OpenRouter)"
         }
     except Exception as e:
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Error processing request: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
 
+# endpoint to check server is up or not
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}

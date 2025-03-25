@@ -6,8 +6,8 @@ import yfinance as yf
 import os
 from dotenv import load_dotenv
 from typing import Optional
-from typing import Dict, Union
 from fastapi.responses import JSONResponse
+from typing import Dict, Union
 import re
 
 
@@ -31,7 +31,7 @@ class StockQuery(BaseModel):
             raise ValueError("Invalid ticker format. Must be 1-5 alphabetical characters")
         return v.upper()
 
-def get_stock_data(ticker: str) -> str:
+def get_stock_data(ticker: str)  -> Dict[str, Union[float, str]]:
     # Fetching real time stock price from yfinanace
     try:
         stock = yf.Ticker(ticker)
@@ -83,19 +83,22 @@ def get_pe_ratio(ticker: str) -> float:
     except:
         return 0
 
-def calculate_price_change(data: dict) -> dict:
-    hist = yf.Ticker(data['ticker']).history(period="5d")
-    return {
-        "5_day": (hist['Close'].iloc[-1] - hist['Close'].iloc[0]) / hist['Close'].iloc[0] * 100
-    }
+def calculate_price_change(data: str) -> dict:
+    try:
+        stock = yf.Ticker(data)
+        hist = stock.history(period="5d")
+        return {
+            "5_day": (hist['Close'].iloc[-1] - hist['Close'].iloc[0]) / hist['Close'].iloc[0] * 100
+        }
+    except:
+        return {"5_day": 0}
 
 def analyze_volume(data: dict) -> str:
-    avg_volume = sum(data.get('volume_history', [])) / len(data.get('volume_history', [1]))
-    return "Above Average" if data['current_volume'] > avg_volume else "Below Average"
-
-def validate_response(response: str) -> bool:
-    """Ensure response contains valid recommendation"""
-    return bool(re.search(r"Recommendation:\s*(Buy|Sell|Hold)", response, re.I))
+    try:
+        avg = sum(data.get('volume_history', [data['volume']])) / len(data.get('volume_history', [1]))
+        return "Above Average" if data['volume'] > avg else "Below Average"
+    except:
+        return "Unknown"
 
 def create_stock_agent():
     """Create and configure the LangChain stock market agent"""
@@ -158,7 +161,7 @@ async def analyze_stock(query: StockQuery):
             re.IGNORECASE
         )
         recommendation = recommendation_match.group(1).capitalize() if recommendation_match else "Hold"
-        
+        print(recommendation)
         # Clean analysis text
         analysis = re.sub(
             r"\s*Recommendation:\s*(Buy|Sell|Hold).*", 
@@ -166,6 +169,7 @@ async def analyze_stock(query: StockQuery):
             response, 
             flags=re.IGNORECASE | re.DOTALL
         ).strip()
+        print(analysis)
 
         return {
             "ticker": query.ticker,
@@ -173,7 +177,7 @@ async def analyze_stock(query: StockQuery):
             "recommendation": recommendation,
             "confidence_metrics": {
                 "pe_ratio": stock_data.get('pe_ratio', 0),
-                "price_change": calculate_price_change(stock_data),
+                "price_change": calculate_price_change(query.ticker),
                 "volume_trend": analyze_volume(stock_data)
             },
             "source": "yfinance + DeepSeek V3 (OpenRouter)"
